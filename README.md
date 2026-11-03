@@ -6,7 +6,7 @@ Build side of the home-cluster WhatsApp MCP server. The Kubernetes manifests, th
 |---|---|
 | `.github/workflows/whatsapp-mcp-image.yml` | Manual workflow. Builds [Sealjay/mcp-whatsapp](https://github.com/Sealjay/mcp-whatsapp) at a pinned upstream tag (input `ref`, default `v0.6.0`) for `linux/amd64` and pushes `wilkobets/whatsapp-mcp:<ref>`. The log shows the image's user and home, which the Deployment's `runAsUser`, `fsGroup` and mount path must match |
 | `.github/workflows/whatsapp-sidecar-image.yml` | Manual workflow. Builds `sidecar/` for `linux/amd64` and pushes `wilkobets/whatsapp-sidecar:<tag>` (input `tag`, default `v0.1.0`) |
-| `sidecar/` | A small Go program (`main.go`, commented for someone new to Go) that watches the server's `messages.db` and publishes each new incoming message to MQTT at `whatsapp/incoming/<chat jid>`. Runs as the `mqtt-sidecar` container in the same pod as the server |
+| `sidecar/` | A small Go program (`main.go`, commented for someone new to Go) that watches the server's `messages.db` and publishes each new incoming message, as JSON, to the one MQTT topic given in its `TOPIC` environment variable (no topic logic in the code; the chat is the `chat_jid` field of the payload). Runs as the `mqtt-sidecar` container in the same pod as the server |
 
 Both workflows need the repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`.
 

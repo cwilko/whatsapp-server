@@ -40,7 +40,7 @@ import (
 type config struct {
 	dbPath       string        // path of messages.db on the shared volume
 	mqttURL      string        // broker address, for example tcp://mqtt.automation.svc.cluster.local:1883
-	topicPrefix  string        // every message is published to <topicPrefix>/<chat jid>
+	topic        string        // the one MQTT topic every message is published to (the chat is in the payload)
 	pollInterval time.Duration // how often to look for new rows
 	maxAge       time.Duration // ignore messages older than this (guards against history-sync backfills)
 }
@@ -122,7 +122,7 @@ func loadConfig() (config, error) {
 	if c.mqttURL, err = mustEnv("MQTT_URL"); err != nil {
 		return c, err
 	}
-	if c.topicPrefix, err = mustEnv("TOPIC_PREFIX"); err != nil {
+	if c.topic, err = mustEnv("TOPIC"); err != nil {
 		return c, err
 	}
 	if c.pollInterval, err = envDuration("POLL_INTERVAL"); err != nil {
@@ -220,13 +220,15 @@ func poll(ctx context.Context, db *sql.DB, client mqtt.Client, cfg config, last 
 			log.Fatalf("encode message: %v", err)
 		}
 
-		topic := cfg.topicPrefix + "/" + r.msg.ChatJID
-		if err := publish(client, topic, payload); err != nil {
+		// Every message goes to the same topic, set by the TOPIC environment variable, so this program stays generic:
+		// the topic naming convention lives in the Deployment, and a subscriber that cares about one chat filters on
+		// the chat_jid field of the JSON payload.
+		if err := publish(client, cfg.topic, payload); err != nil {
 			log.Printf("ERROR: %v (will retry on the next tick, rowid %d)", err, r.rowid)
 			return last
 		}
 		// The message text is not logged on purpose: logs are less private than the chat.
-		log.Printf("published rowid %d to %s", r.rowid, topic)
+		log.Printf("published rowid %d to %s", r.rowid, cfg.topic)
 		last = r.rowid
 	}
 	return last
@@ -280,8 +282,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("watching %s from rowid %d, publishing to %s/<chat jid> on %s", cfg.dbPath, last, cfg.topicPrefix,
-		cfg.mqttURL)
+	log.Printf("watching %s from rowid %d, publishing to %s on %s", cfg.dbPath, last, cfg.topic, cfg.mqttURL)
 
 	// The main loop: wake up every pollInterval and check for new rows, until the pod is told to stop.
 	ticker := time.NewTicker(cfg.pollInterval)
