@@ -1,6 +1,6 @@
 name: Build WhatsApp MQTT sidecar image
 
-# Builds wilkobets/whatsapp-mqtt-sidecar from sidecar/ in this repository. Manual only: run it after changing the sidecar
+# Builds wilkobets/whatsapp-sidecar from sidecar/ in this repository. Manual only: run it after changing the sidecar
 # code, then bump the image tag in the Deployment (smart-home-config, workloads/whatsapp/deployment.yaml). Needs the
 # repository secrets DOCKERHUB_USERNAME and DOCKERHUB_TOKEN.
 on:
@@ -15,7 +15,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      IMAGE: wilkobets/whatsapp-mqtt-sidecar
+      IMAGE: wilkobets/whatsapp-sidecar
     steps:
       - uses: actions/checkout@v4
 
