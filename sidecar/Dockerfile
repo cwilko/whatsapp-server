@@ -2,6 +2,10 @@
 FROM golang:1.24-alpine AS build
 WORKDIR /src
 COPY go.mod main.go ./
+# The official golang image sets GOTOOLCHAIN=local, which refuses a dependency that needs a newer Go than the image has
+# (the latest modernc.org/sqlite needed Go 1.26 while this image had 1.24). auto lets `go` download the toolchain that
+# go.mod asks for. Pinning the dependencies (see below) would make this unnecessary.
+ENV GOTOOLCHAIN=auto
 # go.mod lists no dependencies on purpose: `go mod tidy` reads the imports in main.go and fetches the latest version of
 # each (this also writes go.sum). That keeps the repo free of generated files, but means the dependency versions are
 # whatever is latest when the image is built. To pin them, run `go mod tidy` once somewhere with Go installed and commit
