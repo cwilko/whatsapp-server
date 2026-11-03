@@ -16,6 +16,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -39,6 +40,7 @@ import (
 // lower-case letter are private to this package, which is fine here because everything is in one package.
 type config struct {
 	dbPath       string        // path of messages.db on the shared volume
+	waDBPath     string        // path of whatsapp.db (the server's session store), read only for contact names
 	mqttURL      string        // broker address, for example tcp://mqtt.automation.svc.cluster.local:1883
 	topic        string        // the one MQTT topic every message is published to (the chat is in the payload)
 	pollInterval time.Duration // how often to look for new rows
@@ -50,14 +52,19 @@ type config struct {
 // GO: the text in backticks after each field is a "struct tag". The encoding/json package reads it to choose the JSON
 // key, so the Go field `ChatJID` becomes "chat_jid" on the wire. Field names must start with a capital letter for the
 // json package to see them (capital means exported, lower-case means private).
+//
+// sender and chat_jid are the raw identifiers from the database. sender_name and chat_name are display names looked up
+// by the namer below; when no name is known they hold the phone number instead, so they are never empty.
 type message struct {
-	ID        string `json:"id"`
-	ChatJID   string `json:"chat_jid"`
-	Sender    string `json:"sender"`
-	Content   string `json:"content"`
-	MediaType string `json:"media_type"`
-	Timestamp int64  `json:"timestamp"` // Unix seconds, UTC
-	IsGroup   bool   `json:"is_group"`
+	ID         string `json:"id"`
+	ChatJID    string `json:"chat_jid"`
+	ChatName   string `json:"chat_name"` // group subject, or the other person's name in a one-to-one chat
+	Sender     string `json:"sender"`
+	SenderName string `json:"sender_name"` // who sent it: contact name if known, otherwise the number
+	Content    string `json:"content"`
+	MediaType  string `json:"media_type"`
+	Timestamp  int64  `json:"timestamp"` // Unix seconds, UTC
+	IsGroup    bool   `json:"is_group"`
 }
 
 // row pairs a message with its SQLite rowid. The rowid is not published; it is only used to remember how far we have
@@ -119,6 +126,9 @@ func loadConfig() (config, error) {
 	if c.dbPath, err = mustEnv("DB_PATH"); err != nil {
 		return c, err
 	}
+	if c.waDBPath, err = mustEnv("WA_DB_PATH"); err != nil {
+		return c, err
+	}
 	if c.mqttURL, err = mustEnv("MQTT_URL"); err != nil {
 		return c, err
 	}
@@ -176,6 +186,86 @@ func fetchNew(ctx context.Context, db *sql.DB, after int64) ([]row, error) {
 	return out, nil
 }
 
+// contactNameQuery looks up a contact in the server's session database (whatsapp.db). WhatsApp can hold several names
+// for one person; this picks the first non-empty one in the same order as the WhatsApp server itself: the name in your
+// address book (full_name), then the name the person chose for themselves (push_name), then first_name, then
+// business_name. NULLIF(x, '') turns an empty string into NULL so COALESCE can skip it. If every column is empty the
+// result is NULL.
+const contactNameQuery = `
+SELECT COALESCE(NULLIF(full_name, ''), NULLIF(push_name, ''), NULLIF(first_name, ''), NULLIF(business_name, ''))
+FROM whatsmeow_contacts
+WHERE their_jid = ?`
+
+// namer turns WhatsApp identifiers into display names.
+//
+// GO: a struct can have functions attached to it, called "methods". `func (n namer) displayName(...)` means
+// displayName is a method on namer, and `n` inside it is the namer it was called on (written names.displayName(...)).
+type namer struct {
+	msgs     *sql.DB // messages.db: the chats table holds group subjects and cached chat names
+	contacts *sql.DB // whatsapp.db: whatsmeow_contacts holds the address-book and profile names
+}
+
+// lookup runs a query that returns at most one text value. Finding no row, or a NULL, gives "" and no error; a
+// database failure is returned as an error.
+func lookup(ctx context.Context, db *sql.DB, query, arg string) (string, error) {
+	// GO: sql.NullString is a string that can also be NULL; plain `string` cannot hold a NULL, and Scan would fail.
+	var name sql.NullString
+	err := db.QueryRowContext(ctx, query, arg).Scan(&name)
+	// GO: errors.Is checks whether an error is, or wraps, a particular one. sql.ErrNoRows means "no matching row",
+	// which here is an ordinary answer ("unknown") and not a failure.
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("name lookup: %w", err)
+	}
+	return name.String, nil // .String is "" when the value was NULL
+}
+
+// jidUser returns the part of a WhatsApp ID before the "@", which for a person is their phone number.
+func jidUser(jid string) string {
+	// GO: strings.Cut splits at the first "@" and returns the text before it, the text after it, and whether it found
+	// one. The `_` throws away the values not needed here.
+	user, _, _ := strings.Cut(jid, "@")
+	return user
+}
+
+// displayName returns the best name for a person or one-to-one chat: the contact name if there is one, otherwise the
+// name stored for the chat, otherwise the phone number.
+func (n namer) displayName(ctx context.Context, jid string) (string, error) {
+	name, err := lookup(ctx, n.contacts, contactNameQuery, jid)
+	if err != nil {
+		return "", err
+	}
+	if name != "" {
+		return name, nil
+	}
+	name, err = lookup(ctx, n.msgs, `SELECT name FROM chats WHERE jid = ?`, jid)
+	if err != nil {
+		return "", err
+	}
+	if name != "" {
+		return name, nil
+	}
+	return jidUser(jid), nil
+}
+
+// chatName returns the name of the chat a message belongs to: the group's subject for a group (or its ID if the subject
+// is not known yet), and the other person's name for a one-to-one chat.
+func (n namer) chatName(ctx context.Context, m message) (string, error) {
+	if !m.IsGroup {
+		return n.displayName(ctx, m.ChatJID)
+	}
+	name, err := lookup(ctx, n.msgs, `SELECT name FROM chats WHERE jid = ?`, m.ChatJID)
+	if err != nil {
+		return "", err
+	}
+	if name != "" {
+		return name, nil
+	}
+	return jidUser(m.ChatJID), nil
+}
+
 // publish sends one MQTT message and waits until the broker has acknowledged it.
 func publish(client mqtt.Client, topic string, payload []byte) error {
 	// QoS 1 means "at least once": the library resends until the broker confirms. retain=false means the broker does
@@ -194,7 +284,7 @@ func publish(client mqtt.Client, topic string, payload []byte) error {
 // Failure handling: if the database read or a publish fails, the position is NOT advanced past the message that
 // failed, the error is logged, and the next tick tries again. Nothing is silently dropped, and the error shows in
 // `kubectl logs` every tick until it is fixed. (A restart forgets the position, see the README for that limit.)
-func poll(ctx context.Context, db *sql.DB, client mqtt.Client, cfg config, last int64) int64 {
+func poll(ctx context.Context, db *sql.DB, names namer, client mqtt.Client, cfg config, last int64) int64 {
 	rows, err := fetchNew(ctx, db, last)
 	if err != nil {
 		log.Printf("ERROR: %v", err)
@@ -212,6 +302,21 @@ func poll(ctx context.Context, db *sql.DB, client mqtt.Client, cfg config, last 
 			last = r.rowid
 			continue
 		}
+
+		// Add the display names. The sender is stored as a bare number, so the full ID is rebuilt with the suffix that
+		// one-to-one WhatsApp IDs use. A failed lookup is handled like a failed publish: logged, retried next tick.
+		senderName, err := names.displayName(ctx, r.msg.Sender+"@s.whatsapp.net")
+		if err != nil {
+			log.Printf("ERROR: %v (will retry on the next tick, rowid %d)", err, r.rowid)
+			return last
+		}
+		r.msg.SenderName = senderName
+		chatName, err := names.chatName(ctx, r.msg)
+		if err != nil {
+			log.Printf("ERROR: %v (will retry on the next tick, rowid %d)", err, r.rowid)
+			return last
+		}
+		r.msg.ChatName = chatName
 
 		// GO: json.Marshal turns a struct into JSON bytes, using the struct tags defined above.
 		payload, err := json.Marshal(r.msg)
@@ -261,6 +366,20 @@ func main() {
 		log.Fatalf("connect to database %s: %v", cfg.dbPath, err)
 	}
 
+	// Open the server's session database too, only to read contact names. It holds the WhatsApp login keys as well, so it
+	// is opened read-only with the same guards as above and the program only ever runs one SELECT on it
+	// (contactNameQuery).
+	waDSN := "file:" + cfg.waDBPath + "?mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)"
+	waDB, err := sql.Open("sqlite", waDSN)
+	if err != nil {
+		log.Fatalf("open session database: %v", err)
+	}
+	defer waDB.Close()
+	if err := waDB.PingContext(ctx); err != nil {
+		log.Fatalf("connect to session database %s: %v", cfg.waDBPath, err)
+	}
+	names := namer{msgs: db, contacts: waDB}
+
 	// Build the MQTT client. AutoReconnect makes the library reconnect by itself if the broker restarts.
 	// GO: the dots chain method calls; each Set... returns the options object so the calls can be strung together.
 	opts := mqtt.NewClientOptions().
@@ -296,7 +415,7 @@ func main() {
 			log.Print("shutting down")
 			return
 		case <-ticker.C:
-			last = poll(ctx, db, client, cfg, last)
+			last = poll(ctx, db, names, client, cfg, last)
 		}
 	}
 }
