@@ -53,7 +53,8 @@ type config struct {
 // key, so the Go field `ChatJID` becomes "chat_jid" on the wire. Field names must start with a capital letter for the
 // json package to see them (capital means exported, lower-case means private).
 //
-// sender and chat_jid are the raw identifiers from the database. sender_name and chat_name are display names looked up
+// sender is the sender's phone number (a LID stored by WhatsApp for some group members is swapped for the number when
+// the server knows it; otherwise the stored value is kept as is). chat_jid is the chat's WhatsApp ID. sender_name and chat_name are display names looked up
 // by the namer below; when no name is known they hold the phone number instead, so they are never empty.
 type message struct {
 	ID         string `json:"id"`
@@ -266,6 +267,26 @@ func (n namer) chatName(ctx context.Context, m message) (string, error) {
 	return jidUser(m.ChatJID), nil
 }
 
+// lidToPhoneQuery maps a "LID" to a phone number using the server's session database. WhatsApp can identify a group
+// member by an anonymous LID instead of a phone number, and the messages table then stores the LID's digits in the
+// sender column. The server keeps the LID-to-number pairs in whatsmeow_lid_map, learned from group member lists.
+const lidToPhoneQuery = `SELECT pn FROM whatsmeow_lid_map WHERE lid = ?`
+
+// resolveSender returns the sender's phone number when the stored sender is a LID the server has a mapping for, and
+// the stored value unchanged otherwise (an ordinary phone number simply has no row in the LID table).
+func (n namer) resolveSender(ctx context.Context, sender string) (string, error) {
+	// A stored LID can carry a device suffix after a colon ("123:5"); the table is keyed on the part before it.
+	lid, _, _ := strings.Cut(sender, ":")
+	phone, err := lookup(ctx, n.contacts, lidToPhoneQuery, lid)
+	if err != nil {
+		return "", err
+	}
+	if phone != "" {
+		return phone, nil
+	}
+	return sender, nil
+}
+
 // publish sends one MQTT message and waits until the broker has acknowledged it.
 func publish(client mqtt.Client, topic string, payload []byte) error {
 	// QoS 1 means "at least once": the library resends until the broker confirms. retain=false means the broker does
@@ -305,7 +326,15 @@ func poll(ctx context.Context, db *sql.DB, names namer, client mqtt.Client, cfg 
 
 		// Add the display names. The sender is stored as a bare number, so the full ID is rebuilt with the suffix that
 		// one-to-one WhatsApp IDs use. A failed lookup is handled like a failed publish: logged, retried next tick.
-		senderName, err := names.displayName(ctx, r.msg.Sender+"@s.whatsapp.net")
+		// In a group the stored sender can be a LID rather than a phone number; swap in the number when it is known, so
+		// both the name lookup below and anything reading `sender` work from the phone number.
+		phone, err := names.resolveSender(ctx, r.msg.Sender)
+		if err != nil {
+			log.Printf("ERROR: %v (will retry on the next tick, rowid %d)", err, r.rowid)
+			return last
+		}
+		r.msg.Sender = phone
+		senderName, err := names.displayName(ctx, phone+"@s.whatsapp.net")
 		if err != nil {
 			log.Printf("ERROR: %v (will retry on the next tick, rowid %d)", err, r.rowid)
 			return last
