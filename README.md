@@ -1,6 +1,6 @@
 # whatsapp-server
 
-Build side of the home-cluster WhatsApp MCP server. The Kubernetes manifests, the ingress route and the operating notes (pairing, troubleshooting, ideas) are in the `smart-home-config` repository, under `workloads/whatsapp/`. This repository holds only what is built into container images.
+Build side of the home-cluster WhatsApp MCP server. The Kubernetes manifests and the ingress route are in the `smart-home-config` repository, under `workloads/whatsapp/`. How it works, and the deploy, pairing and troubleshooting steps, are in `smart-home-docs` (`systems/whatsapp.md` and `runbooks/whatsapp.md`). This repository holds only what is built into container images.
 
 | Path | What |
 |---|---|
@@ -16,4 +16,4 @@ Update the image tag in `smart-home-config/workloads/whatsapp/deployment.yaml` a
 
 ## Status
 
-The sidecar has not been compiled or run yet; the first workflow run is its first build and may need fixes. The Dockerfile fetches the latest dependency versions at build time (see the comment in `sidecar/Dockerfile` for how to pin them).
+The sidecar is deployed and publishing to MQTT. The Dockerfile fetches the latest dependency versions at build time; pinning them is tracked in [cwilko/smart-home-docs#38](https://github.com/cwilko/smart-home-docs/issues/38) (see the comment in `sidecar/Dockerfile` for how).
