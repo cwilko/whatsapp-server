@@ -1,18 +1,14 @@
 # Two-stage build: the first stage has the Go compiler, the second is a tiny image holding only the compiled program.
-FROM golang:1.24-alpine AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
-COPY go.mod main.go ./
-# The official golang image sets GOTOOLCHAIN=local, which refuses a dependency that needs a newer Go than the image has
-# (the latest modernc.org/sqlite needed Go 1.26 while this image had 1.24). auto lets `go` download the toolchain that
-# go.mod asks for. Pinning the dependencies (see below) would make this unnecessary.
-ENV GOTOOLCHAIN=auto
-# go.mod lists no dependencies on purpose: `go mod tidy` reads the imports in main.go and fetches the latest version of
-# each (this also writes go.sum). That keeps the repo free of generated files, but means the dependency versions are
-# whatever is latest when the image is built. To pin them, run `go mod tidy` once somewhere with Go installed and commit
-# the resulting go.mod and go.sum, then drop this line.
-RUN go mod tidy
+# go.mod and go.sum pin every dependency version (and checksum), so a rebuild gets the same code. The builder image's Go
+# must be at least the `go` line in go.mod: the official golang image uses GOTOOLCHAIN=local, so it refuses to build
+# otherwise. To update the dependencies, run `go get -u ./... && go mod tidy` in sidecar/ and commit go.mod and go.sum.
+COPY go.mod go.sum main.go ./
+# -mod=readonly (below) makes the build fail rather than change go.mod or go.sum.
+RUN go mod download
 # CGO_ENABLED=0 builds a fully static binary (the SQLite driver is pure Go, so no C library is needed).
-RUN CGO_ENABLED=0 go build -trimpath -o /out/whatsapp-sidecar .
+RUN CGO_ENABLED=0 go build -mod=readonly -trimpath -o /out/whatsapp-sidecar .
 
 # distroless/static has no shell and no package manager; "nonroot" is its default user, the Deployment overrides it to
 # uid 1000 so the program can read the files the WhatsApp server writes.

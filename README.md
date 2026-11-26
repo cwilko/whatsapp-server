@@ -16,4 +16,4 @@ Update the image tag in `smart-home-config/workloads/whatsapp/deployment.yaml` a
 
 ## Status
 
-The sidecar is deployed and publishing to MQTT. The Dockerfile fetches the latest dependency versions at build time; pinning them is tracked in [cwilko/smart-home-docs#38](https://github.com/cwilko/smart-home-docs/issues/38) (see the comment in `sidecar/Dockerfile` for how).
+The sidecar is deployed and publishing to MQTT. Its dependency versions are pinned in `sidecar/go.mod` and `sidecar/go.sum`; the comment in `sidecar/Dockerfile` says how to update them.
